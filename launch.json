@@ -1,0 +1,33 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "HamsterHook",
+    "constructorArgs": [
+      "$poolManager",
+      "$token",
+      "$factory",
+      "$owner"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeAddLiquidity",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
+  },
+  "token": {
+    "contract": "HamsterToken",
+    "name": "Hamster Hour",
+    "symbol": "HAMSTER",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "HamsterToken is a plain fixed-supply ERC-20 (name Hamster Hour, symbol HAMSTER, 18 decimals) with no constructor arguments, no owner, mint, burn, tax, pause or upgrade; it mints the whole supply to its deployer, the launch factory. HamsterHook constructor(IPoolManager manager_, address token_, address factory_, address team_): manager_ is $poolManager; token_ is $token (HamsterToken, deployed just before the hook); factory_ is $factory, the only sender beforeInitialize accepts; team_ is $owner, a fixed payment recipient for the TEAM share of the anti-snipe tax with no administrative power. The IMD pair currency (0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7) and HamsterVault (0x1dceb78b36b5f18ac4a130f1ffc76eba0e73d183) are constants in the hook. The pool key is immutable: the hook derives currency order from the two addresses and accepts exactly one pool with LP fee 12500 (1.25%, static) and tickSpacing 60; any other key, dynamic-fee keys included, is refused. beforeInitialize is PoolManager-only, factory-only and one-shot; it records the pool start time for the tax. Permissions declared by getHookPermissions and encoded in the mined address: beforeInitialize, beforeAddLiquidity, beforeSwap, afterSwap, beforeSwapReturnDelta, afterSwapReturnDelta (low 14 address bits 0x28cc). beforeAddLiquidity is PoolManager-only, returns no delta and takes no fee; while the anti-snipe tax is live it refuses any non-factory position that would hold IMD (a resting bid that would bypass the buy tax), classified by the pool's current tick exactly as Pool.modifyLiquidity does; HAMSTER-only positions pass, the factory may add any position at any time, and once the tax reaches 0 it gates nothing. No remove-liquidity or donate callbacks, so the factory's zero-liquidity fee collect and every withdrawal pass untouched. Hook fee: 1.1% of the actual gross IMD leg of every swap in all four modes, taken from real PoolManager deltas (partial fills pay only on what filled): 0.5% to vault depositRewards, 0.5% to forwardJackpot, 0.1% to forwardOracle. Anti-snipe tax, buys only, on the IMD leg from pool initialization: 95% in minute 0, minus 2 points per full minute, 0 from minute 48 permanently, split 80% depositDrip, 10% forwardOracle, 10% TEAM. Sells never pay tax. Maximum nominal total with the 1.25% LP fee is 97.35%. Fees are minted as IMD ERC-6909 claims in the PoolManager and accrue as five credit buckets; swaps never call the vault or TEAM and cannot revert because of them. Anyone may call flush(bucket, maxAmount) or flushAll(maxPerBucket), which redeem the claim and deliver IMD via the vault's transferFrom-based methods or a direct transfer to TEAM; a failing delivery rolls back that attempt, keeps the credit and can be retried. There is no owner, pause, upgrade, fee setter, exemption list or re-arm. The hook takes IMD only; it does not convert fees to ETH. The requested 800M HAMSTER remainder for HamsterVault is not something the token or hook can set: the factory receives the whole supply and the launch policy pays the 80% remainder to the payer, who must transfer it to the vault after launch."
+}
