@@ -149,7 +149,8 @@ contract ActorsHandler is Test {
         uint256 creditAfter = hook.credits(HamsterHook.Bucket(b));
         if (ok) {
             assertEq(creditBefore - creditAfter, amount);
-            assertLe(amount, maximum);
+            // Zero is a no-op; smaller nonzero limits are raised to MIN_FLUSH_AMOUNT.
+            assertLe(amount, _effectiveLimit(maximum));
             delivered[b] += amount;
         } else {
             assertEq(creditAfter, creditBefore, "failed flush lost credit");
@@ -165,11 +166,17 @@ contract ActorsHandler is Test {
         uint256 sum;
         for (uint256 i; i < 5; ++i) {
             uint256 paid = before[i] - hook.credits(HamsterHook.Bucket(i));
-            assertLe(paid, maximum);
+            assertLe(paid, _effectiveLimit(maximum));
             delivered[i] += paid;
             sum += paid;
         }
         assertEq(sum, sent);
+    }
+
+    function _effectiveLimit(uint256 maximum) internal view returns (uint256) {
+        if (maximum == 0) return 0;
+        uint256 floor = hook.MIN_FLUSH_AMOUNT();
+        return maximum < floor ? floor : maximum;
     }
 
     function flushInsideUnlock(uint8 rawBucket) external {
