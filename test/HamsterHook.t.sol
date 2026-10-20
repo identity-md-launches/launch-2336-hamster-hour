@@ -22,9 +22,12 @@ contract HamsterHookTest is HookTestBase {
         assertEq(hook.taxBps(), 9500);
         assertEq(HookFlags.flagsOf(address(hook)), HookFlags.HAMSTER);
         Hooks.Permissions memory p = hook.getHookPermissions();
-        assertTrue(p.beforeInitialize && p.beforeSwap && p.afterSwap);
+        assertTrue(p.beforeInitialize && p.beforeAddLiquidity && p.beforeSwap && p.afterSwap);
         assertTrue(p.beforeSwapReturnDelta && p.afterSwapReturnDelta);
-        assertFalse(p.beforeRemoveLiquidity || p.afterRemoveLiquidity);
+        assertFalse(p.beforeRemoveLiquidity || p.afterRemoveLiquidity || p.afterAddLiquidity);
+        assertFalse(p.afterInitialize || p.beforeDonate || p.afterDonate);
+        assertFalse(p.afterAddLiquidityReturnDelta || p.afterRemoveLiquidityReturnDelta);
+        assertEq(uint256(HookFlags.HAMSTER), 0x28cc);
         vm.warp(START + 100 days);
         vm.prank(address(manager));
         vm.expectRevert(HamsterHook.AlreadyInitialized.selector);
@@ -41,6 +44,8 @@ contract HamsterHookTest is HookTestBase {
         hook.beforeSwap(address(this), key, params, "");
         vm.expectRevert(HamsterHook.OnlyPoolManager.selector);
         hook.afterSwap(address(this), key, params, BalanceDelta.wrap(0), "");
+        vm.expectRevert(HamsterHook.OnlyPoolManager.selector);
+        hook.beforeAddLiquidity(address(this), key, ModifyLiquidityParams(-600, 600, 1, bytes32(0)), "");
         vm.expectRevert(HamsterHook.OnlyPoolManager.selector);
         hook.unlockCallback(abi.encode(1));
         vm.expectRevert(HamsterHook.OnlySelf.selector);
@@ -73,6 +78,12 @@ contract HamsterHookTest is HookTestBase {
         vm.prank(address(manager));
         vm.expectRevert(HamsterHook.WrongPool.selector);
         hook.afterSwap(address(router), bad, params, BalanceDelta.wrap(0), "");
+        vm.prank(address(manager));
+        vm.expectRevert(HamsterHook.WrongPool.selector);
+        hook.beforeAddLiquidity(address(this), bad, ModifyLiquidityParams(-600, 600, 1, bytes32(0)), "");
+        vm.prank(address(manager));
+        vm.expectRevert(HamsterHook.NotInitialized.selector);
+        fresh.beforeAddLiquidity(address(this), freshKey, ModifyLiquidityParams(-600, 600, 1, bytes32(0)), "");
     }
 
     function test_everyMinuteBothBuyModesAndUntaxedSells() public {
@@ -233,12 +244,36 @@ contract HamsterHookTest is HookTestBase {
         _assertSolvent();
     }
 
+    function test_flushLimitBelowFloorIsRaisedSoCreditsAreNotDeliveredAsDust() public {
+        _trade(true, true, 100 ether, false);
+        assertEq(hook.MIN_FLUSH_AMOUNT(), 1 ether);
+        // A caller-chosen 1 wei limit on a 76 IMD bucket delivers a whole 1 IMD piece, not 1 wei.
+        vm.prank(makeAddr("griefer"));
+        (bool ok, uint256 sent) = hook.flush(HamsterHook.Bucket.Drip, 1);
+        assertTrue(ok);
+        assertEq(sent, 1 ether);
+        assertEq(vault.received(IHamsterVault.depositDrip.selector), 1 ether);
+        // A bucket below the floor is delivered whole in one call, never split.
+        assertEq(hook.credits(HamsterHook.Bucket.Rewards), 0.5 ether);
+        vm.prank(makeAddr("griefer"));
+        (ok, sent) = hook.flush(HamsterHook.Bucket.Rewards, 1);
+        assertTrue(ok);
+        assertEq(sent, 0.5 ether);
+        assertEq(vault.received(IHamsterVault.depositRewards.selector), 0.5 ether);
+        assertEq(hook.credits(HamsterHook.Bucket.Rewards), 0);
+        // flushAll applies the same floor per bucket; a limit at the floor is honored exactly.
+        uint256 remaining = hook.totalCredits();
+        assertEq(hook.flushAll(1 ether - 1), 1 ether + 0.5 ether + 1 ether + 1 ether);
+        assertEq(hook.totalCredits(), remaining - 3.5 ether);
+        _assertSolvent();
+    }
+
     function test_noHookDataBypassAndFactoryCanCollectFees() public {
         uint256 beforeCredits = hook.totalCredits();
         router.swap(key, _params(true, true, 100 ether, false), abi.encode(true, TEAM, address(hook)));
         assertEq(hook.totalCredits() - beforeCredits, 96.1 ether);
         uint256 owed = hook.totalCredits();
-        BalanceDelta fees = router.modify(key, ModifyLiquidityParams(-600, 600, 0, bytes32(0)));
+        BalanceDelta fees = _modifyAsFactory(ModifyLiquidityParams(-600, 600, 0, bytes32(0)));
         assertGe(fees.amount0(), 0);
         assertGe(fees.amount1(), 0);
         assertTrue(fees.amount0() > 0 || fees.amount1() > 0);

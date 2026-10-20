@@ -72,6 +72,29 @@ Fees use real PoolManager deltas, including price-limited and liquidity-limited
 partial fills. Unused input is not taxed. The implementation and rounding proof
 are described in [docs/ACCOUNTING.md](docs/ACCOUNTING.md).
 
+## Liquidity during the tax window
+
+A liquidity position on the IMD side of the current price is a resting bid: every
+untaxed sell of HAMSTER fills it at pool price, so its owner would acquire HAMSTER
+for IMD with no hook fee and no anti-snipe tax, and earn the LP fee on top. To
+keep "buy-only tax from pool start" and "no fee bypass" true for range orders,
+the hook enables `beforeAddLiquidity` and applies one rule while `taxBps() > 0`:
+
+| Sender | Position | Allowed |
+| --- | --- | --- |
+| Launch factory (`$factory`) | Any | Yes |
+| Anyone else | Funded with HAMSTER only (entirely on the buy side of the current tick) | Yes |
+| Anyone else | Holds any IMD (IMD-only or two-sided, including a range whose lower edge sits on the current tick) | No, `ImdLiquidityDuringTax` |
+
+"HAMSTER only" uses exactly the classification `Pool.modifyLiquidity` uses:
+with IMD as `currency0` the range must satisfy `tick >= tickUpper`, otherwise
+`tick < tickLower`. Such a position never turns IMD into HAMSTER: taxed buys move
+the price into it and sell its HAMSTER for IMD, which is the untaxed direction.
+From minute 48 the rule is gone permanently; it cannot re-arm, and there is no
+owner switch. Removals, zero-liquidity fee collection, and donations never reach
+this callback, so the factory's fee collection and every withdrawal are untouched.
+Liquidity operations never accrue hook fees.
+
 ## Credits and delivery
 
 Swaps never call the vault, approve tokens, transfer fees, or invoke TEAM.
@@ -107,7 +130,13 @@ Call flush **outside** an existing PoolManager unlock. A locked-out redemption
 fails safely and leaves the credit intact. Each call is capped at
 `type(int128).max`, respecting the manager's signed delta limit and the vault's
 larger unsigned limit; a smaller caller-selected limit is useful for maintenance.
-Zero limits and empty buckets are no-ops.
+Zero limits and empty buckets are no-ops. A non-zero limit below
+`MIN_FLUSH_AMOUNT` (1 IMD, `1e18`) is raised to it, so a bucket is delivered
+whole or in pieces of at least 1 IMD. The vault's `depositRewards` appends one
+7-day stream boundary per deposit once its reward clock moves, and stakers step
+through those boundaries in later checkpoints, so an unbounded caller-chosen
+limit would let anyone turn one credit into millions of dust deposits. The floor
+bounds that to one boundary per IMD of fees while keeping flushing permissionless.
 There is no keeper bounty. There is also no rescue path for unsolicited token or
 claim donations, and no alternate recipient if the immutable vault permanently
 stops working. A gas-exhausting vault may exhaust a standalone flush transaction;
@@ -134,18 +163,19 @@ initialization. PoolManager is not hardcoded, and construction makes no external
 calls or code-existence checks.
 
 Mine the hook's CREATE2 address with its **complete creation code and constructor
-arguments**, so its low 14 bits are **`0x20cc` (8396)**. The constructor validates
+arguments**, so its low 14 bits are **`0x28cc` (10444)**. The constructor validates
 the address against `getHookPermissions()` and rejects a mismatch.
 `HookFlags` supplies internal-only mining predicates. No external library linking
 is required.
 
-Enabled permissions are `beforeInitialize`, `beforeSwap`, `afterSwap`,
-`beforeSwapReturnDelta`, and `afterSwapReturnDelta`. Initialization guards the
-predicted pool before hook deployment and starts the tax. The swap callbacks
-support both specified and unspecified IMD legs. Every enabled callback and the
-redemption callback checks PoolManager. There are no liquidity callbacks, so
-factory fee collection with zero liquidity change and normal withdrawals remain
-available.
+Enabled permissions are `beforeInitialize`, `beforeAddLiquidity`, `beforeSwap`,
+`afterSwap`, `beforeSwapReturnDelta`, and `afterSwapReturnDelta`. Initialization
+guards the predicted pool before hook deployment and starts the tax. The swap
+callbacks support both specified and unspecified IMD legs. `beforeAddLiquidity`
+enforces the tax-window liquidity rule above and returns no delta. Every enabled
+callback and the redemption callback checks PoolManager. `beforeRemoveLiquidity`
+and `afterRemoveLiquidity` stay disabled, so factory fee collection with zero
+liquidity change and normal withdrawals cannot be blocked by the hook.
 
 The design is a minimal general-purpose, BaseHook-style implementation using
 v4-core interfaces directly. It has no share token, administrative access, dynamic
@@ -175,9 +205,16 @@ transfer from that recipient.
 - The remainder recipient / launch allocation step funds HamsterVault with the
   full 800M HAMSTER as described above.
 - The existing vault's TEAM calls its one-time `bindToken(address)` with the
-  deployed HamsterToken address **after** the vault holds at least 800M. This is
-  a responsibility of the already deployed vault, not an admin operation on the
-  token or hook.
+  deployed HamsterToken address **after** the vault holds at least 800M. At the
+  pinned vault commit, `bindToken` reverts with `InvalidAmount` while the vault's
+  HAMSTER balance is below 800,000,000 tokens, and `stake` requires a bound token,
+  so nothing in the vault works for stakers until the remainder has been
+  forwarded. No contract in this repository can perform that transfer: the token
+  mints the whole supply to the factory and the launch policy pays the 80%
+  remainder to the payer. This is a responsibility of the already deployed vault
+  and the remainder recipient, not an admin operation on the token or hook. Hook
+  flushes before binding are safe: `depositRewards` and `depositDrip` do not
+  require a bound token, and with no staked weight the vault's clock is paused.
 - A keeper, project operator, or any user periodically calls `flush`/`flushAll`,
   observes `credits`, `totalCredits`, and `FlushFailed`, and retries failures.
 - The vault's operators and users handle its reward maintenance and downstream
@@ -196,8 +233,13 @@ to impose this pool's fee on unrelated venues.
 The default suite exercises a real locally deployed Uniswap v4 PoolManager,
 both currency orderings, all four swap modes, every tax minute and boundary,
 partial and zero-liquidity fills, dust, startup with no IMD reserves,
-permission checks, immutable pool identity, credit conservation, and adversarial
-vault delivery. Stateful tests mix trades, time, vault failures, and retries.
+permission checks, immutable pool identity, credit conservation, the tax-window
+liquidity rule (IMD range orders refused in minutes 0 and 47 and filled from
+minute 48, HAMSTER-only positions collecting and withdrawing during the window,
+factory positions, boundary ticks, and a fuzz over ranges and minutes), the
+flush floor, and adversarial vault delivery. Stateful tests mix trades, time,
+vault failures, and retries. The test contract plays the launch factory: it
+initializes the pool and seeds its liquidity through its own unlock callback.
 There are no skipped tests in the default suite.
 
 An additional integration rehearsal passed against Ethereum state at block

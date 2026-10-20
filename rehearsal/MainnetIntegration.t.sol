@@ -31,8 +31,9 @@ contract MainnetIntegrationTest is HookTestBase {
         manager.initialize(key, Q96);
         router = new TestRouter(manager);
         deal(IMD, address(router), 1_000_000 ether);
+        deal(IMD, address(this), 1_000_000 ether);
         deployed.transfer(address(router), 1_000_000 ether);
-        router.modify(key, ModifyLiquidityParams(-600, 600, int256(LIQUIDITY), bytes32(0)));
+        _modifyAsFactory(ModifyLiquidityParams(-600, 600, int256(LIQUIDITY), bytes32(0)));
     }
 
     function test_mainnetImdAndVaultAllModesAndFlush() public {

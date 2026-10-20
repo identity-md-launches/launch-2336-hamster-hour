@@ -6,8 +6,11 @@ import {Vm} from "forge-std/Vm.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
@@ -19,7 +22,8 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockVault} from "./mocks/MockVault.sol";
 import {TestRouter} from "./mocks/TestRouter.sol";
 
-abstract contract HookTestBase is Test {
+/// @dev The test contract is the launch factory: it initializes the pool and seeds its liquidity itself.
+abstract contract HookTestBase is Test, IUnlockCallback {
     using StateLibrary for IPoolManager;
     using TransientStateLibrary for IPoolManager;
 
@@ -63,8 +67,9 @@ abstract contract HookTestBase is Test {
         router = new TestRouter(manager);
         imd.mint(address(router), 1e35);
         hamster.mint(address(router), 1e35);
-        router.modify(
-            key,
+        imd.mint(address(this), 1e35);
+        hamster.mint(address(this), 1e35);
+        _modifyAsFactory(
             ModifyLiquidityParams({
                 tickLower: oneSided ? int24(-60) : int24(-600),
                 tickUpper: oneSided ? int24(60) : int24(600),
@@ -74,15 +79,42 @@ abstract contract HookTestBase is Test {
         );
     }
 
+    /// @dev Modifies the factory's own position in `key` and settles from the factory's balances.
+    function _modifyAsFactory(ModifyLiquidityParams memory params) internal returns (BalanceDelta) {
+        return abi.decode(manager.unlock(abi.encode(params)), (BalanceDelta));
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(manager), "manager only");
+        (BalanceDelta delta,) = manager.modifyLiquidity(key, abi.decode(data, (ModifyLiquidityParams)), "");
+        _settleFactory(key.currency0, delta.amount0());
+        _settleFactory(key.currency1, delta.amount1());
+        return abi.encode(delta);
+    }
+
+    function _settleFactory(Currency currency, int128 amount) private {
+        if (amount < 0) {
+            manager.sync(currency);
+            require(IERC20(Currency.unwrap(currency)).transfer(address(manager), uint256(-int256(amount))));
+            manager.settle();
+        } else if (amount > 0) {
+            manager.take(currency, address(this), uint256(int256(amount)));
+        }
+    }
+
     function _deployHook(IPoolManager pm, address t, address f, address team) internal returns (HamsterHook result) {
         bytes memory code = abi.encodePacked(type(HamsterHook).creationCode, abi.encode(pm, t, f, team));
         bytes32 hash = keccak256(code);
-        for (uint256 i; i < 200_000; ++i) {
-            bytes32 salt = bytes32(i);
-            address predicted =
-                address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, hash)))));
+        // One 85-byte CREATE2 preimage buffer, rewritten in place: the search never grows memory.
+        bytes memory preimage = abi.encodePacked(bytes1(0xff), address(this), bytes32(0), hash);
+        for (uint256 i; i < 1_000_000; ++i) {
+            address predicted;
+            assembly ("memory-safe") {
+                mstore(add(preimage, 53), i)
+                predicted := and(keccak256(add(preimage, 32), 85), 0xffffffffffffffffffffffffffffffffffffffff)
+            }
             if (HookFlags.matches(predicted, HookFlags.HAMSTER) && predicted.code.length == 0) {
-                result = new HamsterHook{salt: salt}(pm, t, f, team);
+                result = new HamsterHook{salt: bytes32(i)}(pm, t, f, team);
                 assertEq(address(result), predicted);
                 return result;
             }

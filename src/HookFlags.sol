@@ -18,8 +18,8 @@ library HookFlags {
     uint160 internal constant AFTER_ADD_LIQUIDITY_RETURN_DELTA = 1 << 1;
     uint160 internal constant AFTER_REMOVE_LIQUIDITY_RETURN_DELTA = 1;
     uint160 internal constant ALL = (1 << 14) - 1;
-    uint160 internal constant HAMSTER =
-        BEFORE_INITIALIZE | BEFORE_SWAP | AFTER_SWAP | BEFORE_SWAP_RETURN_DELTA | AFTER_SWAP_RETURN_DELTA;
+    uint160 internal constant HAMSTER = BEFORE_INITIALIZE | BEFORE_ADD_LIQUIDITY | BEFORE_SWAP | AFTER_SWAP
+        | BEFORE_SWAP_RETURN_DELTA | AFTER_SWAP_RETURN_DELTA;
 
     function flagsOf(address hook) internal pure returns (uint160) {
         return uint160(hook) & ALL;

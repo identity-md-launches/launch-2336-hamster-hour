@@ -59,7 +59,7 @@ contract HamsterEdgesTest is HookTestBase {
     }
 
     function test_zeroLiquidityDoesNotPayFeesInAnyMode() public {
-        router.modify(key, ModifyLiquidityParams(-600, 600, -int256(LIQUIDITY), bytes32(0)));
+        _modifyAsFactory(ModifyLiquidityParams(-600, 600, -int256(LIQUIDITY), bytes32(0)));
         uint256 snapshot = vm.snapshotState();
         for (uint256 mode; mode < 4; ++mode) {
             if (mode != 0) assertTrue(vm.revertToState(snapshot));
@@ -137,9 +137,7 @@ contract HamsterEdgesTest is HookTestBase {
             router = new TestRouter(manager);
             imd.mint(address(router), 1e35);
             hamster.mint(address(router), 1e35);
-            router.modify(
-                key, ModifyLiquidityParams(openingTick - 600, openingTick + 600, int256(LIQUIDITY), bytes32(0))
-            );
+            _modifyAsFactory(ModifyLiquidityParams(openingTick - 600, openingTick + 600, int256(LIQUIDITY), bytes32(0)));
             assertEq(_trade(true, true, 1 ether, false).userImd, 1 ether);
             assertEq(_trade(true, false, 1000 ether, false).hamsterAmount, 1000 ether);
             assertEq(_trade(false, true, 1000 ether, false).hamsterAmount, 1000 ether);

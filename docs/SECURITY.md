@@ -5,21 +5,22 @@ Uniswap v4 checklists. It is not an independent audit or launch authorization.
 
 | Area | Implementation / evidence |
 | --- | --- |
-| Callback origin | All four reachable callbacks require the immutable PoolManager. Direct unauthorized calls are tested. |
+| Callback origin | All five reachable callbacks require the immutable PoolManager. Direct unauthorized calls are tested. |
 | Pool binding | Constructor-derived immutable PoolId covers both currencies, static fee, tick spacing, and hook address. Every lifecycle callback checks it. |
 | Initialization | Factory-only, explicit `initialized` boolean, no setter or second start. Timestamp-zero and expired re-arm attempts are tested. |
-| Permissions | Exactly `0x20cc`; constructor validates the mined address. No liquidity or donation callbacks and no LP fee override. |
+| Permissions | Exactly `0x28cc`; constructor validates the mined address. No remove-liquidity or donation callbacks and no LP fee override. |
+| Range-order bypass | `beforeAddLiquidity` refuses, while the tax is live, any non-factory position that holds IMD, using the pool's own tick classification. HAMSTER-only positions, removals, and zero-delta collection pass. Tested in both orderings, at boundary ticks, per minute, and by fuzz. |
 | NoOp exposure | Before-swap deltas contain only the bounded IMD fee. Simulation is self-only and unconditionally reverts. The real AMM provides all HAMSTER execution. |
 | Fee bypass | Sender and hookData never grant exemptions. New routers and arbitrary hookData are tested. Other pools cannot use this hook. |
 | All modes | Real PoolManager tests cover buys/sells, exact input/output, both currency orderings, full/partial/zero fills, and integer dust. |
 | Conservation | Per-trade bucket, event-delta, and claim assertions plus 4,096 stateful calls at the pinned seed. |
 | Slippage | Both simulation and execution use the caller's unchanged sqrt-price limit. Routers must still enforce deadlines and net-output/max-input limits. |
 | Vault isolation | No vault calls on the swap path. Reverting, absent, no-pull, short-pull, and reentrant vaults are tested. |
-| Credit delivery | Permissionless retry, exact approvals, balance checks, atomic rollback, fixed destinations, five bounded iterations. |
+| Credit delivery | Permissionless retry, exact approvals, balance checks, atomic rollback, fixed destinations, five bounded iterations. A 1 IMD floor on caller-chosen limits stops dust deliveries from appending one vault stream boundary each. |
 | Reentrancy | Public flush guard, self-only delivery helper, manager-only redemption callback with an exact pending amount. Credits debit before interactions. |
 | Token behavior | Fixed known IMD; SafeERC20 checks transfers. Nonstandard transfer/rebasing behavior during delivery leaves the credit outstanding. HAMSTER is an ordinary fixed-supply ERC-20. |
 | Authority | No owner, pause, fee change, upgrade, arbitrary call, rescue, privileged exemption, or route setter. TEAM only receives payments. |
-| Factory liquidity | No hook fees or gating on zero-liquidity fee collection or normal liquidity withdrawal. |
+| Factory liquidity | The factory may add any position at any time. No hook fees or gating on zero-liquidity fee collection or normal liquidity withdrawal by anyone. |
 | Supply | Constructor-only 1B mint to factory; tested transfer/allowance flows and absent mint/burn/admin selectors. |
 | Bytecode | Runtime below EIP-170; reachable-code scans exclude DELEGATECALL, CALLCODE and SELFDESTRUCT. No external library linking. |
 | Offline build | Sources and licenses vendored; compiler version pinned; no FFI or filesystem permissions. |
@@ -63,6 +64,10 @@ or every future state of the external IMD/vault contracts.
 - Permissionless means someone still has to pay gas for flushes. A permanently
   broken vault strands its credits but cannot disable swaps.
 - The hook cannot impose fees on another venue while keeping HAMSTER plain.
+- During the 48-minute window nobody but the factory can supply IMD-side
+  liquidity to this pool. Buyers trade against the factory's HAMSTER-only seed
+  and whatever HAMSTER-only positions others add; the LP fee those positions earn
+  is paid by taxed buyers, not by bypassing the tax.
 - The additional rollback simulation costs gas in buy exact-input and sell
   exact-output modes. It must be included in router estimates.
 - Amounts are limited by v4's signed 128-bit deltas; impossible oversized amounts

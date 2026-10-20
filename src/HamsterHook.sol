@@ -10,9 +10,10 @@ import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {IHamsterVault} from "./interfaces/IHamsterVault.sol";
 import {HookFlags} from "./HookFlags.sol";
 
@@ -22,6 +23,7 @@ import {HookFlags} from "./HookFlags.sol";
 /// The simulation cannot persist a hook-skipping swap. See docs/ACCOUNTING.md for the derivation.
 contract HamsterHook is IUnlockCallback {
     using SafeERC20 for IERC20;
+    using StateLibrary for IPoolManager;
 
     address public constant IMD = 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7;
     address public constant VAULT = 0x1DCeb78b36b5F18Ac4a130F1FFc76ebA0E73D183;
@@ -33,6 +35,8 @@ contract HamsterHook is IUnlockCallback {
     uint256 public constant TAX_STEP_BPS = 200;
     uint256 public constant TAX_MINUTES = 48;
     uint256 public constant MAX_FLUSH_AMOUNT = uint256(uint128(type(int128).max));
+    /// @dev Smallest caller-chosen flush limit, so credits cannot be delivered to the vault as dust.
+    uint256 public constant MIN_FLUSH_AMOUNT = 1e18;
     uint160 public constant REQUIRED_FLAGS = HookFlags.HAMSTER;
 
     IPoolManager public immutable poolManager;
@@ -74,6 +78,7 @@ contract HamsterHook is IUnlockCallback {
     error UnexpectedUnlock();
     error TransferMismatch();
     error VaultUnavailable();
+    error ImdLiquidityDuringTax();
 
     event PoolStarted(PoolId indexed id, uint256 timestamp);
     event FeesAccrued(bool indexed buy, uint256 grossImd, uint256 poolImd, uint256 permanentFee, uint256 antiSnipeTax);
@@ -117,6 +122,7 @@ contract HamsterHook is IUnlockCallback {
 
     function getHookPermissions() public pure returns (Hooks.Permissions memory p) {
         p.beforeInitialize = true;
+        p.beforeAddLiquidity = true;
         p.beforeSwap = true;
         p.afterSwap = true;
         p.beforeSwapReturnDelta = true;
@@ -141,6 +147,27 @@ contract HamsterHook is IUnlockCallback {
         startedAt = block.timestamp;
         emit PoolStarted(poolId, block.timestamp);
         return IHooks.beforeInitialize.selector;
+    }
+
+    /// @notice While the anti-snipe tax is live, only the factory may add liquidity that holds IMD.
+    /// @dev An IMD-side position is a resting bid: untaxed sells fill it, turning IMD into HAMSTER with
+    /// no hook fee or tax. A position funded with HAMSTER alone (entirely on the buy side of the current
+    /// tick, classified exactly as Pool.modifyLiquidity does) never acquires HAMSTER with IMD, so it stays
+    /// open to everyone. Removals and zero-delta fee collection never reach this callback.
+    function beforeAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        bytes calldata
+    ) external view onlyPoolManager returns (bytes4) {
+        _checkPool(key);
+        if (!initialized) revert NotInitialized();
+        if (sender != factory && taxBps() != 0) {
+            (, int24 tick,,) = poolManager.getSlot0(poolId);
+            bool hamsterOnly = imdIsCurrency0 ? tick >= params.tickUpper : tick < params.tickLower;
+            if (!hamsterOnly) revert ImdLiquidityDuringTax();
+        }
+        return IHooks.beforeAddLiquidity.selector;
     }
 
     /// @notice 95%, 93%, ... 1% in minute 47; zero from minute 48 permanently.
@@ -281,12 +308,14 @@ contract HamsterHook is IUnlockCallback {
     }
 
     /// @notice Retry a single bucket. A failed redemption/transfer/vault call leaves all credits intact.
-    /// @param maxAmount Upper limit, in IMD minor units, for this attempt (zero is a no-op).
+    /// @param maxAmount Upper limit, in IMD minor units, for this attempt. Zero is a no-op; a limit below
+    /// MIN_FLUSH_AMOUNT is raised to it, so a bucket is delivered whole or in pieces of at least 1 IMD.
     function flush(Bucket bucket, uint256 maxAmount) external flushGuard returns (bool success, uint256 amount) {
         return _tryFlush(bucket, maxAmount);
     }
 
     /// @notice Try each bucket independently, so a broken vault method cannot hold up other recipients.
+    /// @param maxPerBucket Per-bucket limit with the same zero and MIN_FLUSH_AMOUNT rules as flush.
     function flushAll(uint256 maxPerBucket) external flushGuard returns (uint256 delivered) {
         for (uint256 i; i < 5; ++i) {
             (bool ok, uint256 amount) = _tryFlush(Bucket(i), maxPerBucket);
@@ -295,6 +324,9 @@ contract HamsterHook is IUnlockCallback {
     }
 
     function _tryFlush(Bucket bucket, uint256 maximum) private returns (bool success, uint256 amount) {
+        if (maximum == 0) return (true, 0);
+        // Dust deliveries would append one reward stream boundary per call in the vault; see README.
+        if (maximum < MIN_FLUSH_AMOUNT) maximum = MIN_FLUSH_AMOUNT;
         amount = credits[bucket];
         if (amount > maximum) amount = maximum;
         // Manager burn/take use signed int128 deltas, stricter than the vault's uint128 limit.
