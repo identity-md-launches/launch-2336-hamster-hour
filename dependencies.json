@@ -1,0 +1,28 @@
+[
+  {
+    "repository": "Uniswap/v4-core",
+    "commit": "46c6834698c48bc4a463a86d8420f4eb1d7f3b75",
+    "path": "lib/v4-core",
+    "included": "Production src files and licenses; upstream test helpers excluded"
+  },
+  {
+    "repository": "foundry-rs/forge-std",
+    "commit": "77041d2ce690e692d6e03cc812b57d1ddaa4d505",
+    "path": "lib/forge-std",
+    "included": "src Solidity files and MIT/Apache licenses",
+    "release": "v1.9.7"
+  },
+  {
+    "repository": "OpenZeppelin/openzeppelin-contracts",
+    "commit": "69c8def5f222ff96f2b5beff05dfba996368aa79",
+    "path": "lib/openzeppelin-contracts",
+    "included": "ERC20/SafeERC20 transitive source dependencies and license",
+    "release": "v5.1.0"
+  },
+  {
+    "repository": "transmissions11/solmate",
+    "commit": "89365b880c4f3c786bdd453d4b8e8fe410344a69",
+    "path": "lib/solmate",
+    "included": "src/auth/Owned.sol (PoolManager dependency) and license"
+  }
+]
